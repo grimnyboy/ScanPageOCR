@@ -23,15 +23,30 @@ except ImportError:
 
 
 class DocumentOCR:
-    def __init__(self, input_folder=".", output_folder="output", auto_split=False):
+    def __init__(self, input_folder=".", output_folder="output", auto_split=False,
+                 word_spacing_tolerance=80, left_word_penalty_threshold=150,
+                 confidence_threshold=0.3, sharpening_strength=1.3):
         """
         auto_split: True = автоматично разделяне на две страници
                     False = третира всяко изображение като една страница
+        
+        CONFIGURABLE PARAMETERS:
+        - word_spacing_tolerance: X-разстояние толеранция за групиране на думи (px)
+        - left_word_penalty_threshold: Наказание за думи наляво (px)
+        - confidence_threshold: Минимална confidence за приемане на детекции
+        - sharpening_strength: Коефициент за шарпеникг (1.0 = без шарпеникг)
         """
         self.input_folder = input_folder
         self.output_folder = output_folder
         self.debug_folder = os.path.join(output_folder, "debug_images")
         self.auto_split = auto_split
+        
+        # Configurable parameters
+        self.word_spacing_tolerance = word_spacing_tolerance
+        self.left_word_penalty_threshold = left_word_penalty_threshold
+        self.confidence_threshold = confidence_threshold
+        self.sharpening_strength = sharpening_strength
+        
         os.makedirs(output_folder, exist_ok=True)
         os.makedirs(self.debug_folder, exist_ok=True)
 
@@ -80,17 +95,25 @@ class DocumentOCR:
 
     def preprocess_for_easyocr(self, image):
         """
-        Preprocessing с SHARPENING (Unsharp Mask)
-        Най-добър резултат според тестовете
+        Preprocessing с SHARPENING (Unsharp Mask) и CLAHE
+        Подобрена версия с адаптивни параметри и CLAHE
         """
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         
-        # Unsharp Mask: gray - blur = sharpened
-        # Formula: sharpened = gray * 1.5 - blur * 0.5
-        gaussian_blur = cv2.GaussianBlur(gray, (5, 5), 1.0)
-        sharpened = cv2.addWeighted(gray, 1.5, gaussian_blur, -0.5, 0)
+        # CLAHE първо за адаптивна контрастност (НОВО)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
         
-        return sharpened
+        # Unsharp Mask: gray - blur = sharpened
+        # Адаптивна формула: sharpened = enhanced * strength - blur * (strength - 1)
+        gaussian_blur = cv2.GaussianBlur(enhanced, (5, 5), 1.0)
+        sharpened = cv2.addWeighted(enhanced, self.sharpening_strength, 
+                                   gaussian_blur, -(self.sharpening_strength - 1), 0)
+        
+        # Дескю поддръжка за EasyOCR (НОВО)
+        deskewed = self.deskew(sharpened)
+        
+        return deskewed
 
     # ---------------------------
     # PAGE DETECTION - ПОДОБРЕНО
@@ -119,31 +142,31 @@ class DocumentOCR:
                 vis = cv2.cvtColor(vis, cv2.COLOR_GRAY2BGR)
             # Рисуваме split линията
             cv2.line(vis, (split_x, 0), (split_x, height), (0, 0, 255), 3)
-            cv2.putText(vis, f"SPLIT at x={split_x}", (split_x + 10, 50),
+            cv2.putText(vis, f"SPLIT at x={{split_x}}", (split_x + 10, 50),
                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
             cv2.imwrite(debug_path, vis)
-            print(f"   📊 Split визуализация: {debug_path}")
-            print(f"   ✂️  Split позиция: x={split_x} (ляво={split_x}px, дясно={width-split_x}px)")
+            print(f"   📊 Split визуализация: {{debug_path}}")
+            print(f"   ✂️  Split позиция: x={{split_x}} (ляво={{split_x}}px, дясно={{width-split_x}}px)")
         
         return [left, right]
 
     def detect_pages(self, image_path):
         img = cv2.imread(image_path)
         if img is None:
-            print(f"Грешка при зареждане: {image_path}")
+            print(f"Грешка при зареждане: {{image_path}}")
             return []
         
         h, w = img.shape[:2]
         
         # Проверяваме дали трябва да разделим
         if self.auto_split and w / h > 1.1:
-            print(f"📖 Разпозната книга (две страници) - aspect ratio: {w/h:.2f}")
+            print(f"📖 Разпозната книга (две страници) - aspect ratio: {{w/h:.2f}}")
             base_name = Path(image_path).stem
-            debug_path = os.path.join(self.debug_folder, f"{base_name}_split.jpg")
+            debug_path = os.path.join(self.debug_folder, f"{{base_name}}_split.jpg")
             return self.split_book_pages(img, debug_path)
         else:
             if self.auto_split:
-                print(f"📄 Една страница - aspect ratio: {w/h:.2f}")
+                print(f"📄 Една страница - aspect ratio: {{w/h:.2f}}")
             else:
                 print(f"📄 Auto-split изключен - третираме като една страница")
             return [img]
@@ -154,7 +177,7 @@ class DocumentOCR:
     def post_process_text(self, text):
         if not text:
             return text
-        text = re.sub(r"(?<!^)[ ]{2,}", " ", text, flags=re.MULTILINE)
+        text = re.sub(r"(?<!^)[ ]{{2,}}", " ", text, flags=re.MULTILINE)
         text = re.sub(r"\. ([a-z])", lambda m: ". " + m.group(1).upper(), text)
         return text
 
@@ -202,13 +225,13 @@ class DocumentOCR:
             
             # Информация
             top_left = (int(bbox[0][0]), int(bbox[0][1]) - 5)
-            info_text = f"c:{conf:.2f}"
+            info_text = f"c:{{conf:.2f}}"
             cv2.putText(vis_image, info_text, top_left, 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1)
         
         cv2.imwrite(output_path, vis_image)
-        print(f"   📊 Debug визуализация: {output_path}")
-        print(f"   📈 Статистика: {len(results)} думи визуализирани")
+        print(f"   📊 Debug визуализация: {{output_path}}")
+        print(f"   📈 Статистика: {{len(results)}} думи визуализирани")
 
     # ---------------------------
     # OCR ENGINES
@@ -222,27 +245,29 @@ class DocumentOCR:
         
         # Визуализация
         if debug_name:
-            debug_path = os.path.join(self.debug_folder, f"{debug_name}_detections.jpg")
+            debug_path = os.path.join(self.debug_folder, f"{{debug_name}}_detections.jpg")
             self.visualize_detections(processed, results, debug_path, conf_threshold=0.0)
         
         # Принтираме detected текст
         print(f"\n   🔍 Detected текст (първите 20):")
         for i, (bbox, text, conf) in enumerate(results[:20]):
             x, y = int(bbox[0][0]), int(bbox[0][1])
-            print(f"      {i+1}. [{x:4d},{y:4d}] conf={conf:.2f} '{text}'")
+            print(f"      {{i+1}}. [{{x:4d}},{{y:4d}}] conf={{conf:.2f}} '{{text}}'")
         
-        # КРИТИЧНА ПРОМЯНА: НЯМА филтриране по confidence!
-        # Приемаме ВСИЧКИ detected думи
-        print(f"\n   ⚠️  Confidence filtering ИЗКЛЮЧЕН - приемаме всички {len(results)} думи!")
-        filtered = results  # Всички думи, без филтриране!
+        # ПОДОБРЕНО: Мягко филтриране по confidence (ПРОМЕНЕНО)
+        print(f"\n   ⚠️  Confidence filtering: conf >= {{self.confidence_threshold}}")
+        filtered = [r for r in results if r[2] > self.confidence_threshold]
         
         if not filtered:
-            print(f"   ⚠️  След филтриране (conf > 0.15): 0 думи!")
+            print(f"   ⚠️  След филтриране (conf > {{self.confidence_threshold}}): 0 думи!")
+            print(f"   💡 Hint: Понижи confidence_threshold ако имаш нулеви резултати")
             return ""
+        
+        print(f"   ✅ Приети: {{len(filtered)}}/{{len(results)}} думи")
 
         # Намираме левия margin за табулация
         doc_left_margin = min([bbox[0][0] for bbox, text, conf in filtered])
-        print(f"   📏 Левия margin: {int(doc_left_margin)}px")
+        print(f"   📏 Левия margin: {{int(doc_left_margin)}}px")
         
         # НОВА ЛОГИКА: Човешки-подобно групиране на думи в редове
         print(f"   🧠 Използване на човешки-подобен flow-based алгоритъм за line grouping")
@@ -255,6 +280,7 @@ class DocumentOCR:
     def group_words_into_lines_human_like(self, filtered_words, image_height, doc_left_margin):
         """
         Групира думи в редове следвайки flow-а на текста като човек
+        Оптимизирано със конфигурируеми параметри
         """
         if not filtered_words:
             return []
@@ -280,7 +306,7 @@ class DocumentOCR:
         base_y_tolerance = image_height * 0.015
         
         while True:
-            # Намираме първата неизползвана дума (най-горе, после най-ляво)
+            # Намираме първата неизползвана дума (най-горе, depois най-ляво)
             unused = [w for w in words_with_pos if not w['used']]
             if not unused:
                 break
@@ -302,9 +328,10 @@ class DocumentOCR:
             max_iterations = len(unused)
             for iteration in range(max_iterations):
                 # Кандидати: неизползвани думи които са надясно
+                # ПОДОБРЕНО: Използване на конфигурируемо word_spacing_tolerance
                 candidates = [
                     w for w in words_with_pos 
-                    if not w['used'] and w['x'] >= current_x - 80
+                    if not w['used'] and w['x'] >= current_x - self.word_spacing_tolerance
                 ]
                 
                 if not candidates:
@@ -315,8 +342,8 @@ class DocumentOCR:
                     x_dist = abs(w['x'] - current_x)
                     y_dist = abs(w['y'] - current_y)
                     
-                    # Penalty за думи наляво
-                    if w['x'] < current_x - 150:
+                    # Penalty за думи наляво (ПОДОБРЕНО: конфигурируемо)
+                    if w['x'] < current_x - self.left_word_penalty_threshold:
                         x_dist += 2000
                     
                     return x_dist * 0.4 + y_dist * 0.6
@@ -367,7 +394,7 @@ class DocumentOCR:
                 if first_word and first_word[0].islower() and first_word not in ["and", "or", "to", "in", "of", "for", "a", "the"]:
                     line_text = "• " + line_text
             
-            print(f"   LINE {line_num}: indent={int(indent_pixels)}px, {len(current_line_words)} words → '{line_text[:70]}...'")
+            print(f"   LINE {{line_num}}: indent={{int(indent_pixels)}}px, {{len(current_line_words)}} words → '{{line_text[:70]}}...'")
             
             lines.append(indent + line_text)
         
@@ -391,33 +418,33 @@ class DocumentOCR:
     # MAIN PROCESSING
     # ---------------------------
     def process_image(self, image_path):
-        print(f"\n{'='*70}")
-        print(f"📄 Обработка: {image_path}")
-        print(f"{'='*70}")
+        print(f"\n{{'='*70}}")
+        print(f"📄 Обработка: {{image_path}}")
+        print(f"{{'='*70}}")
         
         pages = self.detect_pages(image_path)
-        print(f"📑 Открити страници: {len(pages)}")
+        print(f"📑 Открити страници: {{len(pages)}}")
         base_name = Path(image_path).stem
 
         for i, page in enumerate(pages, 1):
-            print(f"\n--- Страница {i}/{len(pages)} ---")
+            print(f"\n--- Страница {{i}}/{{len(pages)}} ---")
             
-            debug_name = f"{base_name}_page{i}" if len(pages) > 1 else base_name
+            debug_name = f"{{base_name}}_page{{i}}" if len(pages) > 1 else base_name
             text = self.extract_text(page, debug_name)
             
             if not text.strip():
-                print(f"⚠️  Няма разпознат текст на страница {i}.")
+                print(f"⚠️  Няма разпознат текст на страница {{i}}.")
                 continue
 
             if len(pages) > 1:
                 name = "left" if i == 1 else "right"
-                output_file = os.path.join(self.output_folder, f"{base_name}_{name}.txt")
+                output_file = os.path.join(self.output_folder, f"{{base_name}}_{{name}}.txt")
             else:
-                output_file = os.path.join(self.output_folder, f"{base_name}.txt")
+                output_file = os.path.join(self.output_folder, f"{{base_name}}.txt")
 
             with open(output_file, "w", encoding="utf-8") as f:
                 f.write(text)
-            print(f"\n✅ Записан: {output_file}")
+            print(f"\n✅ Записан: {{output_file}}")
 
     def process_all_images(self):
         image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
@@ -430,19 +457,23 @@ class DocumentOCR:
             print("Няма намерени изображения в текущата папка.")
             return
 
-        print(f"🔎 Намерени {len(image_files)} файла.\n")
+        print(f"🔎 Намерени {{len(image_files)}} файла.\n")
 
         for image_file in image_files:
             try:
                 full_path = os.path.join(self.input_folder, image_file)
                 self.process_image(full_path)
+            except FileNotFoundError as e:
+                print(f"❌ Файл не намерен: {{image_file}} - {{e}}")
+            except ValueError as e:
+                print(f"❌ Невалидно изображение: {{image_file}} - {{e}}")
             except Exception as e:
-                print(f"❌ Грешка при {image_file}: {e}")
+                print(f"❌ Неочаквана грешка при {{image_file}}: {{type(e).__name__}}: {{e}}")
 
-        print(f"\n{'='*70}")
+        print(f"\n{{'='*70}}")
         print("✅ Готово! Резултатите са в папка 'output'.")
         print(f"📊 Debug изображения са в папка 'output/debug_images'.")
-        print(f"{'='*70}")
+        print(f"{{'='*70}}")
 
 
 def main():
@@ -450,9 +481,18 @@ def main():
     print("OCR СКРИПТ С ПОДОБРЕНО РАЗДЕЛЯНЕ НА СТРАНИЦИ")
     print("=" * 70)
     
-    # ВАЖНО: Промени auto_split=True ако искаш автоматично разделяне
-    # За скенирани книги препоръчвам auto_split=False и ръчно разделяне
-    ocr = DocumentOCR(input_folder=".", output_folder="output", auto_split=False)
+    # ВАЖНО: Промени параметрите при нужда
+    # confidence_threshold=0.3 филтрира слаби детекции
+    # sharpening_strength=1.3 контролира шарпеникг интензивност
+    # word_spacing_tolerance=80 контролира разстоянието между думи
+    ocr = DocumentOCR(
+        input_folder=".",
+        output_folder="output",
+        auto_split=False,
+        confidence_threshold=0.3,  # Минимална confidence
+        sharpening_strength=1.3,   # Шарпеникг интензивност
+        word_spacing_tolerance=80  # X-разстояние толеранция
+    )
     ocr.process_all_images()
 
 
